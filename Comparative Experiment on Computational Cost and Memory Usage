@@ -1,0 +1,106 @@
+!pip install catboost category_encoders
+import numpy as np
+import pandas as pd
+import time
+import sys
+from catboost import CatBoostClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from category_encoders import TargetEncoder, HashingEncoder
+
+class PairEncoder:
+    def __init__(self, max_len=20):
+        self.pair2id = {}
+        self.next_id = 1
+        self.max_len = max_len
+
+    def encode_chunk(self, chunk):
+        pairs = [chunk[i:i+2] for i in range(0, len(chunk), 2)]
+        ids = []
+        for p in pairs:
+            if p not in self.pair2id:
+                self.pair2id[p] = self.next_id
+                self.next_id += 1
+            ids.append(self.pair2id[p])
+        return ids
+
+    def encode_name(self, name):
+        chunks = name.split(" ")
+        encoded = []
+        for c in chunks:
+            encoded.extend(self.encode_chunk(c))
+        encoded = encoded[:self.max_len]
+        encoded += [0] * (self.max_len - len(encoded))
+        return encoded
+
+    def fit_transform(self, names):
+        return np.array([self.encode_name(n) for n in names])
+
+def memory_mb(arr):
+    return arr.nbytes / (1024 * 1024)
+
+def benchmark_encoding(X, y, encoder_name, X_encoded):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_encoded, y, test_size=0.2, random_state=42
+    )
+
+    model = CatBoostClassifier(
+        depth=6, learning_rate=0.1, verbose=False
+    )
+
+    # 学習時間
+    t0 = time.time()
+    model.fit(X_train, y_train)
+    train_time = time.time() - t0
+
+    # 推論時間
+    t1 = time.time()
+    _ = model.predict(X_test)
+    infer_time = time.time() - t1
+
+    # メモリ
+    mem = memory_mb(X_encoded)
+
+    return {
+        "encoder": encoder_name,
+        "train_time": train_time,
+        "infer_time": infer_time,
+        "memory_MB": mem
+    }
+
+def run_benchmark(df):
+    results = []
+
+    names = df["Name"]
+    y = df["Survived"]
+
+    # ① Pair Encoding
+    pe = PairEncoder(max_len=20)
+    X_pe = pe.fit_transform(names)
+    results.append(benchmark_encoding(X_pe, y, "Pair Encoding", X_pe))
+
+    # ② One-Hot
+    ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    X_ohe = ohe.fit_transform(names.values.reshape(-1,1))
+    results.append(benchmark_encoding(X_ohe, y, "One-Hot", X_ohe))
+
+    # ③ Target Encoding
+    te = TargetEncoder()
+    X_te = te.fit_transform(names, y).values.reshape(-1,1)
+    results.append(benchmark_encoding(X_te, y, "Target Encoding", X_te))
+
+    # ④ Hashing Encoding
+    he = HashingEncoder(n_components=16)
+    X_he = he.fit_transform(names).values
+    results.append(benchmark_encoding(X_he, y, "Hashing", X_he))
+
+    return pd.DataFrame(results)
+
+train = pd.read_csv("train.csv")
+test = pd.read_csv("test.csv")
+gender = pd.read_csv("gender_submission.csv")
+test["Survived"] = gender["Survived"]
+df = pd.concat([train, test], ignore_index=True)
+
+df_results = run_benchmark(df)
+df_results
