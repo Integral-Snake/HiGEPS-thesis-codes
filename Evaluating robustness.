@@ -1,0 +1,75 @@
+!pip install catboost
+from catboost import CatBoostClassifier
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.impute import KNNImputer
+from sklearn.metrics import accuracy_score
+
+def add_missing(data, col, rate):
+    data = data.copy()
+    n = int(len(data) * rate)
+    idx = np.random.choice(len(data), n, replace=False)
+    data.loc[idx, col] = np.nan
+    return data
+
+def add_noise(data, cols, sigma):
+    data = data.copy()
+    for c in cols:
+        noise = np.random.normal(0, sigma, size=len(data))
+        data[c] = data[c] + noise
+    return data
+
+def subsample(data, n):
+    return data.sample(n=n, replace=False, random_state=42)
+
+def robustness_experiment(df):
+    results = []
+
+    missing_rates = np.arange(0.0, 1.0, 0.1)
+    noise_levels = [0, 0.5, 1.0, 2.0]
+    sample_sizes = [100, 300, 500, 700, len(df)]
+
+    for mr in missing_rates:
+        for nl in noise_levels:
+            for ss in sample_sizes:
+
+                # データ生成
+                df_mod = df.copy()
+                df_mod = add_missing(df_mod, "Age", mr)
+                df_mod = add_noise(df_mod, ["Age", "Fare"], nl)
+                df_mod = subsample(df_mod, ss)
+
+                # 前処理
+                imputer = KNNImputer()
+                X = df_mod.drop("Survived", axis=1)
+                y = df_mod["Survived"]
+                X = imputer.fit_transform(X)
+
+                # 学習
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42
+                )
+
+                model = CatBoostClassifier(
+                    depth=6,
+                    learning_rate=0.1,
+                    verbose=False
+                )
+                model.fit(X_train, y_train)
+
+                # 評価
+                pred = model.predict(X_test)
+                acc = accuracy_score(y_test, pred)
+
+                results.append({
+                    "missing_rate": mr,
+                    "noise_sigma": nl,
+                    "sample_size": ss,
+                    "accuracy": acc
+                })
+
+    return pd.DataFrame(results)
+
+df_results = robustness_experiment(df)
+df_results.head()
