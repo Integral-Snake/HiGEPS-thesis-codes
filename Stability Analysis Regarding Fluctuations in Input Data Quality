@@ -1,0 +1,167 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split
+from sklearn.impute import KNNImputer
+from sklearn.metrics import accuracy_score
+from catboost import CatBoostClassifier
+
+def add_missing(data, col, rate):
+    data = data.copy()
+    n = int(len(data) * rate)
+    idx = np.random.choice(len(data), n, replace=False)
+    data.loc[idx, col] = np.nan
+    return data
+
+def add_noise(data, cols, sigma):
+    data = data.copy()
+    for c in cols:
+        noise = np.random.normal(0, sigma, size=len(data))
+        data[c] = data[c] + noise
+    return data
+
+def stability_analysis(df):
+    results = []
+
+    missing_rates = np.arange(0.0, 1.0, 0.1)
+    noise_levels = [0, 0.5, 1.0, 2.0]
+
+    for mr in missing_rates:
+        for nl in noise_levels:
+            df_mod = df.copy()
+            df_mod = add_missing(df_mod, "Age", mr)
+            df_mod = add_noise(df_mod, ["Age", "Fare"], nl)
+            imputer = KNNImputer()
+            X = df_mod.drop("Survived", axis=1)
+            y = df_mod["Survived"]
+            X = imputer.fit_transform(X)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+            model = CatBoostClassifier(
+                depth=6, learning_rate=0.1, verbose=False
+            )
+            model.fit(X_train, y_train)
+            pred = model.predict(X_test)
+            acc = accuracy_score(y_test, pred)
+            results.append({
+                "missing_rate": mr,
+                "noise_sigma": nl,
+                "accuracy": acc
+            })
+
+    return pd.DataFrame(results)
+
+train = pd.read_csv("train.csv")
+test = pd.read_csv("test.csv")
+gender = pd.read_csv("gender_submission.csv")
+test["Survived"] = gender["Survived"]
+df = pd.concat([train, test], ignore_index=True)
+
+# ============================================
+# 2. 欠損値補完（KNN）
+# ============================================
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+categorical_cols = df.select_dtypes(exclude=[np.number]).columns
+
+imputer = KNNImputer(n_neighbors=5)
+df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
+
+# ============================================
+# 3. カテゴリカル処理（Name 含む完全汎用）
+# ============================================
+import pandas as pd
+import numpy as np
+from sklearn.impute import KNNImputer
+from sklearn.model_selection import train_test_split
+from catboost import CatBoostClassifier, Pool
+from sklearn.metrics import accuracy_score
+import string
+
+# 使用する文字セット（英字・数字・スペース・記号）
+chars = list(string.ascii_letters + string.digits + " ,.()[]{}-_/\\'\"")
+
+# 初期辞書（全組み合わせ）
+pairs = [a + b for a in chars for b in chars]
+
+encode_df = pd.DataFrame({
+    "chunk": pairs,
+    "code": range(1, len(pairs) + 1)
+})
+
+encode_dict = dict(zip(encode_df["chunk"], encode_df["code"]))
+next_code = len(encode_dict) + 1
+
+
+def encode_chunk(x):
+    """2文字の chunk を辞書で符号化。なければ新規追加。"""
+    global next_code, encode_df, encode_dict
+
+    if x in encode_dict:
+        return encode_dict[x]
+
+    # 新規追加
+    encode_dict[x] = next_code
+    encode_df.loc[len(encode_df)] = [x, next_code]
+    next_code += 1
+    return encode_dict[x]
+
+def encode_small_category(series):
+    """種類が少ないカテゴリ → 1から順番にエンコード"""
+    unique_vals = series.unique()
+    mapping = {v: i+1 for i, v in enumerate(unique_vals)}
+    return series.map(mapping)
+
+
+def split_by_space(series, col):
+    """スペース区切り → 分割"""
+    max_len = series.str.split().map(len).max()
+    new_cols = []
+    for i in range(max_len):
+        new_col = f"{col}_part{i+1}"
+        df[new_col] = series.str.split().str[i]
+        new_cols.append(new_col)
+    return new_cols
+
+
+def encode_two_char(series, col):
+    """2文字ずつに分割して符号化"""
+    max_len = series.map(len).max()
+    new_cols = []
+
+    for i in range(0, max_len, 2):
+        new_col = f"{col}_chunk{i//2+1}"
+        df[new_col] = series.apply(lambda x: x[i:i+2] if isinstance(x, str) else "")
+        df[new_col] = df[new_col].apply(lambda x: encode_chunk(x))
+        new_cols.append(new_col)
+
+    return new_cols
+
+
+# メイン処理（Name も含む）
+for col in categorical_cols:
+    s = df[col].astype(str)
+    uniq = s.nunique()
+    n = len(s)
+
+    if uniq <= n / 3:
+        # (2-1) 種類が少ない → 1から順番にエンコード
+        df[col + "_encoded"] = encode_small_category(s)
+        df.drop(columns=[col], inplace=True)
+
+    else:
+        # (2-2) 種類が多い → 二段階処理
+        # ① スペースで分割
+        parts = split_by_space(s, col)
+        df.drop(columns=[col], inplace=True)
+
+        # ② 各パートを2文字ずつ符号化
+        for p in parts:
+            df[p] = df[p].astype(str)
+            encode_two_char(df[p], p)
+            df.drop(columns=[p], inplace=True)
+
+df_results = stability_analysis(df)
+df_results.head()
