@@ -1,0 +1,114 @@
+!pip install category_encoders catboost
+import numpy as np
+import pandas as pd
+import time
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from sklearn.feature_extraction.text import TfidfVectorizer
+from category_encoders import TargetEncoder, CountEncoder, HashingEncoder
+from catboost import CatBoostClassifier
+from sklearn.metrics import accuracy_score
+
+class PairEncoder:
+    def __init__(self, max_len=20):
+        self.pair2id = {}
+        self.next_id = 1
+        self.max_len = max_len
+
+    def encode_chunk(self, chunk):
+        pairs = [chunk[i:i+2] for i in range(0, len(chunk), 2)]
+        ids = []
+        for p in pairs:
+            if p not in self.pair2id:
+                self.pair2id[p] = self.next_id
+                self.next_id += 1
+            ids.append(self.pair2id[p])
+        return ids
+
+    def encode_value(self, val):
+        chunks = str(val).split(" ")
+        encoded = []
+        for c in chunks:
+            encoded.extend(self.encode_chunk(c))
+        encoded = encoded[:self.max_len]
+        encoded += [0] * (self.max_len - len(encoded))
+        return encoded
+
+    def fit_transform(self, series):
+        return np.array([self.encode_value(v) for v in series])
+
+def memory_mb(arr):
+    return arr.nbytes / (1024 * 1024)
+
+def benchmark(X, y, name):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    model = CatBoostClassifier(depth=6, learning_rate=0.1, verbose=False)
+
+    t0 = time.time()
+    model.fit(X_train, y_train)
+    train_time = time.time() - t0
+
+    t1 = time.time()
+    pred = model.predict(X_test)
+    infer_time = time.time() - t1
+
+    acc = accuracy_score(y_test, pred)
+    mem = memory_mb(X)
+
+    return {
+        "encoder": name,
+        "accuracy": acc,
+        "train_time": train_time,
+        "infer_time": infer_time,
+        "memory_MB": mem
+    }
+
+def compare_encoders(df):
+    results = []
+
+    names = df["Name"]
+    y = df["Survived"]
+
+    # 1. Pair Encoding
+    pe = PairEncoder(max_len=20)
+    X_pe = pe.fit_transform(names)
+    results.append(benchmark(X_pe, y, "Pair Encoding"))
+
+    # 2. Label Encoding
+    le = LabelEncoder()
+    X_le = le.fit_transform(names).reshape(-1,1)
+    results.append(benchmark(X_le, y, "Label Encoding"))
+
+    # 3. Target Encoding
+    te = TargetEncoder()
+    X_te = te.fit_transform(names, y).values.reshape(-1,1)
+    results.append(benchmark(X_te, y, "Target Encoding"))
+
+    # 4. Count Encoding
+    ce = CountEncoder()
+    X_ce = ce.fit_transform(names).values.reshape(-1,1)
+    results.append(benchmark(X_ce, y, "Count Encoding"))
+
+    # 5. Hashing Trick
+    he = HashingEncoder(n_components=16)
+    X_he = he.fit_transform(names).values
+    results.append(benchmark(X_he, y, "Hashing Trick"))
+
+    # 6. TF-IDF (character n-gram)
+    tfidf = TfidfVectorizer(analyzer="char", ngram_range=(2,3), max_features=500)
+    X_tfidf = tfidf.fit_transform(names).toarray()
+    results.append(benchmark(X_tfidf, y, "TF-IDF (char n-gram)"))
+
+    return pd.DataFrame(results)
+
+train = pd.read_csv("train.csv")
+test = pd.read_csv("test.csv")
+gender = pd.read_csv("gender_submission.csv")
+test["Survived"] = gender["Survived"]
+df = pd.concat([train, test], ignore_index=True)
+
+df_results = compare_encoders(df)
+df_results
