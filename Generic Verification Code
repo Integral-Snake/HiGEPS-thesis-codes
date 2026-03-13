@@ -1,0 +1,78 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from catboost import CatBoostClassifier
+
+# --- 1. Adult データセット読み込み ---
+url = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+cols = [
+    "age","workclass","fnlwgt","education","education-num","marital-status",
+    "occupation","relationship","race","sex","capital-gain","capital-loss",
+    "hours-per-week","native-country","income"
+]
+
+df_adult = pd.read_csv(url, names=cols, na_values=" ?", skipinitialspace=True)
+
+# --- 2. 欠損処理（drop しない） ---
+df_adult = df_adult.fillna("Unknown")
+
+# --- 3. income のスペースを除去（最重要） ---
+df_adult["income"] = df_adult["income"].str.strip()
+
+# --- 4. y を作成 ---
+y = (df_adult["income"] == ">50K").astype(int)
+
+print("y value counts:")
+print(y.value_counts())  # ← ここで 0 と 1 が両方あることを確認
+
+# --- 5. Pair Encoding ---
+class PairEncoder:
+    def __init__(self, max_len=20):
+        self.pair2id = {}
+        self.next_id = 1
+        self.max_len = max_len
+
+    def encode_chunk(self, chunk):
+        pairs = [chunk[i:i+2] for i in range(0, len(chunk), 2)]
+        ids = []
+        for p in pairs:
+            if p not in self.pair2id:
+                self.pair2id[p] = self.next_id
+                self.next_id += 1
+            ids.append(self.pair2id[p])
+        return ids
+
+    def encode_value(self, val):
+        chunks = str(val).split(" ")
+        encoded = []
+        for c in chunks:
+            encoded.extend(self.encode_chunk(c))
+        encoded = encoded[:self.max_len]
+        encoded += [0] * (self.max_len - len(encoded))
+        return encoded
+
+    def fit_transform(self, series):
+        return np.array([self.encode_value(v) for v in series])
+
+# 高カードinality列
+target_col = "occupation"
+
+pe = PairEncoder(max_len=20)
+X_pe = pe.fit_transform(df_adult[target_col])
+
+# --- 6. train_test_split（stratify が重要） ---
+X_train, X_test, y_train, y_test = train_test_split(
+    X_pe, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# --- 7. CatBoost ---
+model = CatBoostClassifier(
+    depth=6, learning_rate=0.1, verbose=False
+)
+model.fit(X_train, y_train)
+
+pred = model.predict(X_test)
+acc = accuracy_score(y_test, pred)
+
+print("Accuracy:", acc)
